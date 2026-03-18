@@ -168,18 +168,45 @@ async def del_folder(callback: CallbackQuery):
     db.delete_folder(callback.from_user.id, folder_name)
     await callback.message.edit_text(f"🗑 Папка '{folder_name}' удалена вместе со всеми файлами.", reply_markup=get_main_kb(callback.from_user.id))
 
+import asyncio
+import os
+import logging
+import httpx
+from contextlib import asynccontextmanager
+...
 # --- FASTAPI & LIFESPAN ---
+async def keep_alive(url: str):
+    """Функция для поддержания активности сервера (анти-сон Render)"""
+    if not url:
+        logger.warning("⚠️ SELF_URL не задан, само-пинг отключен.")
+        return
+    
+    async with httpx.AsyncClient() as client:
+        while True:
+            await asyncio.sleep(600)  # Пауза 10 минут
+            try:
+                response = await client.get(url)
+                logger.info(f"📡 Self-ping status: {response.status_code}")
+            except Exception as e:
+                logger.error(f"❌ Self-ping error: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Действия при запуске
     logger.info("🚀 Запуск бота...")
     polling_task = asyncio.create_task(dp.start_polling(bot))
+    
+    # Запуск само-пинга, если задан URL
+    self_url = os.getenv("SELF_URL")
+    ping_task = asyncio.create_task(keep_alive(self_url))
+    
     yield
     # Действия при остановке
     logger.info("🛑 Остановка бота...")
     await dp.stop_polling()
     await bot.session.close()
     polling_task.cancel()
+    ping_task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
