@@ -1,6 +1,7 @@
 import asyncio
 import os
 import logging
+import httpx
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, types, F
@@ -168,13 +169,7 @@ async def del_folder(callback: CallbackQuery):
     db.delete_folder(callback.from_user.id, folder_name)
     await callback.message.edit_text(f"🗑 Папка '{folder_name}' удалена вместе со всеми файлами.", reply_markup=get_main_kb(callback.from_user.id))
 
-import asyncio
-import os
-import logging
-import httpx
-from contextlib import asynccontextmanager
-...
-# --- FASTAPI & LIFESPAN ---
+# --- ПОДДЕРЖАНИЕ АКТИВНОСТИ ---
 async def keep_alive(url: str):
     """Функция для поддержания активности сервера (анти-сон Render)"""
     if not url:
@@ -190,6 +185,7 @@ async def keep_alive(url: str):
             except Exception as e:
                 logger.error(f"❌ Self-ping error: {e}")
 
+# --- FASTAPI & LIFESPAN ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Действия при запуске
