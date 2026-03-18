@@ -6,10 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Берем URL базы данных из переменных окружения
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Создаем пул соединений для стабильной работы
 try:
     connection_pool = psycopg2.pool.SimpleConnectionPool(1, 10, DATABASE_URL)
     logging.info("✅ Успешное подключение к облачной базе PostgreSQL")
@@ -27,7 +25,6 @@ def init_db():
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Таблица папок
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS folders (
                     id SERIAL PRIMARY KEY,
@@ -36,21 +33,21 @@ def init_db():
                     UNIQUE(user_id, name)
                 )
             ''')
-            # Таблица файлов (с каскадным удалением)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS files (
                     id SERIAL PRIMARY KEY,
                     folder_id INTEGER REFERENCES folders (id) ON DELETE CASCADE,
                     file_id TEXT,
                     file_type TEXT,
+                    name TEXT,
                     caption TEXT
                 )
             ''')
             conn.commit()
-            logging.info("🛠 Таблицы в облачной БД проверены/созданы")
     finally:
         put_connection(conn)
 
+# --- Функции Папок ---
 def create_folder(user_id, name):
     conn = get_connection()
     try:
@@ -68,9 +65,30 @@ def get_folders(user_id):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute('SELECT name FROM folders WHERE user_id = %s', (user_id,))
-            rows = cursor.fetchall()
-            return [row[0] for row in rows]
+            cursor.execute('SELECT name FROM folders WHERE user_id = %s ORDER BY name', (user_id,))
+            return [row[0] for row in rows] if (rows := cursor.fetchall()) else []
+    finally:
+        put_connection(conn)
+
+def rename_folder(user_id, old_name, new_name):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('UPDATE folders SET name = %s WHERE user_id = %s AND name = %s', (new_name, user_id, old_name))
+            conn.commit()
+            return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        put_connection(conn)
+
+def delete_folder(user_id, name):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('DELETE FROM folders WHERE user_id = %s AND name = %s', (user_id, name))
+            conn.commit()
     finally:
         put_connection(conn)
 
@@ -84,30 +102,63 @@ def get_folder_id(user_id, name):
     finally:
         put_connection(conn)
 
-def add_file(folder_id, file_id, file_type, caption=None):
+# --- Функции Файлов ---
+def add_file(folder_id, file_id, file_type, name, caption=None):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute('INSERT INTO files (folder_id, file_id, file_type, caption) VALUES (%s, %s, %s, %s)', 
-                           (folder_id, file_id, file_type, caption))
+            cursor.execute('INSERT INTO files (folder_id, file_id, file_type, name, caption) VALUES (%s, %s, %s, %s, %s)', 
+                           (folder_id, file_id, file_type, name, caption))
             conn.commit()
     finally:
         put_connection(conn)
 
-def get_files(folder_id):
+def get_files_in_folder(folder_id):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute('SELECT file_id, file_type, caption FROM files WHERE folder_id = %s', (folder_id,))
+            cursor.execute('SELECT id, name, file_type FROM files WHERE folder_id = %s ORDER BY id DESC', (folder_id,))
             return cursor.fetchall()
     finally:
         put_connection(conn)
 
-def delete_folder(user_id, name):
+def get_file_details(file_id_pk):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute('DELETE FROM folders WHERE user_id = %s AND name = %s', (user_id, name))
+            cursor.execute('SELECT file_id, file_type, name, caption FROM files WHERE id = %s', (file_id_pk,))
+            return cursor.fetchone()
+    finally:
+        put_connection(conn)
+
+def rename_file(file_id_pk, new_name):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('UPDATE files SET name = %s WHERE id = %s', (new_name, file_id_pk))
             conn.commit()
+    finally:
+        put_connection(conn)
+
+def delete_file(file_id_pk):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('DELETE FROM files WHERE id = %s', (file_id_pk))
+            conn.commit()
+    finally:
+        put_connection(conn)
+
+def search_files(user_id, query):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT f.id, f.name, fo.name 
+                FROM files f 
+                JOIN folders fo ON f.folder_id = fo.id 
+                WHERE fo.user_id = %s AND f.name ILIKE %s
+            ''', (user_id, f'%{query}%'))
+            return cursor.fetchall()
     finally:
         put_connection(conn)
