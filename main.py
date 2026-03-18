@@ -9,8 +9,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -45,13 +45,20 @@ class StorageStates(StatesGroup):
     waiting_for_search = State()
 
 # --- КЛАВИАТУРЫ ---
+
+def get_base_reply_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.row(KeyboardButton(text="🗂 Мои папки"), KeyboardButton(text="➕ Создать папку"))
+    builder.row(KeyboardButton(text="🔍 Поиск файла"), KeyboardButton(text="ℹ️ Помощь"))
+    return builder.as_markup(resize_keyboard=True)
+
 def get_main_kb(user_id):
     builder = InlineKeyboardBuilder()
     folders = db.get_folders(user_id)
     for folder in folders:
         builder.button(text=f"📁 {folder}", callback_data=f"folder:{folder}")
-    builder.button(text="➕ Создать папку", callback_data="create_folder")
-    builder.button(text="🔍 Поиск", callback_data="search")
+    if not folders:
+        builder.button(text="У вас пока нет папок 💨", callback_data="none")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -65,23 +72,48 @@ def get_folder_kb(folder_name):
     builder.adjust(2)
     return builder.as_markup()
 
-# --- ХЕНДЛЕРЫ ---
+# --- ХЕНДЛЕРЫ ГЛАВНОГО МЕНЮ ---
+
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("👋 Привет! Я твой продвинутый облачный менеджер.\nУправляй файлами и папками легко.", 
-                         reply_markup=get_main_kb(message.from_user.id))
+    await message.answer("👋 Привет! Я твой продвинутый облачный менеджер.\nИспользуй кнопки внизу для управления.", 
+                         reply_markup=get_base_reply_kb())
+    await message.answer("🗂 Твои папки:", reply_markup=get_main_kb(message.from_user.id))
+
+@dp.message(F.text == "🗂 Мои папки")
+async def show_folders_text(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🗂 Твои папки:", reply_markup=get_main_kb(message.from_user.id))
+
+@dp.message(F.text == "➕ Создать папку")
+async def create_folder_text(message: Message, state: FSMContext):
+    await message.answer("✍️ Введите название для новой папки:")
+    await state.set_state(StorageStates.waiting_for_folder_name)
+
+@dp.message(F.text == "🔍 Поиск файла")
+async def search_file_text(message: Message, state: FSMContext):
+    await message.answer("🔍 Введите название файла для поиска:")
+    await state.set_state(StorageStates.waiting_for_search)
+
+@dp.message(F.text == "ℹ️ Помощь")
+async def help_text(message: Message):
+    help_msg = (
+        "📖 *Как пользоваться ботом:*\n\n"
+        "1️⃣ Создай папку через кнопку '➕ Создать папку'\n"
+        "2️⃣ Зайди в папку и нажми '📤 Добавить файл'\n"
+        "3️⃣ Отправь любой файл и дай ему имя\n"
+        "4️⃣ Теперь файл доступен в списке файлов папки в виде кнопки!\n\n"
+        "🔍 Ты всегда можешь найти нужный файл через поиск по всем папкам."
+    )
+    await message.answer(help_msg, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("🗂 Главное меню:", reply_markup=get_main_kb(callback.from_user.id))
+    await callback.message.edit_text("🗂 Твои папки:", reply_markup=get_main_kb(callback.from_user.id))
 
-# --- РАБОТА С ПАПКАМИ ---
-@dp.callback_query(F.data == "create_folder")
-async def ask_new_folder(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("✍️ Введите название для новой папки:")
-    await state.set_state(StorageStates.waiting_for_folder_name)
+# --- РАБОТА С ПАПКАМИ (ОСТАЛЬНОЕ) ---
 
 @dp.message(StorageStates.waiting_for_folder_name)
 async def process_create_folder(message: Message, state: FSMContext):
@@ -120,19 +152,19 @@ async def confirm_delete_folder(callback: CallbackQuery):
     folder_name = callback.data.split(":")[1]
     db.delete_folder(callback.from_user.id, folder_name)
     await callback.answer(f"🗑 Папка '{folder_name}' удалена")
-    await callback.message.edit_text("🗂 Главное меню:", reply_markup=get_main_kb(callback.from_user.id))
+    await callback.message.edit_text("🗂 Твои папки:", reply_markup=get_main_kb(callback.from_user.id))
 
 # --- РАБОТА С ФАЙЛАМИ ---
+
 @dp.callback_query(F.data.startswith("add_to:"))
 async def ask_file(callback: CallbackQuery, state: FSMContext):
     folder_name = callback.data.split(":")[1]
     await state.update_data(current_folder=folder_name)
-    await callback.message.edit_text(f"🖇 Отправьте файл для папки '{folder_name}'.\nЕсли это альбом, я сохраню его группу.")
+    await callback.message.edit_text(f"🖇 Отправьте файл для папки '{folder_name}'.\nЯ сохраню его под вашим именем.")
     await state.set_state(StorageStates.waiting_for_file)
 
 @dp.message(StorageStates.waiting_for_file)
 async def handle_incoming_file(message: Message, state: FSMContext):
-    # Логика определения типа и ID файла
     file_id = None
     f_type = None
     if message.photo:
@@ -145,23 +177,28 @@ async def handle_incoming_file(message: Message, state: FSMContext):
         file_id, f_type = message.audio.file_id, "audio"
     
     if not file_id:
-        await message.answer("❌ Тип файла не поддерживается.")
+        await message.answer("❌ Тип файла не поддерживается. Попробуйте фото, видео или документ.")
         return
 
     await state.update_data(last_file_id=file_id, last_file_type=f_type, last_caption=message.caption)
-    await message.answer("✍️ Как назовем этот файл/группу?")
+    await message.answer("✍️ Как назовем этот файл?")
     await state.set_state(StorageStates.waiting_for_file_name)
 
 @dp.message(StorageStates.waiting_for_file_name)
 async def save_file_name(message: Message, state: FSMContext):
     data = await state.get_data()
-    folder_name = data['current_folder']
+    folder_name = data.get('current_folder')
+    if not folder_name:
+        await message.answer("❌ Ошибка сессии. Начните заново.")
+        await state.clear()
+        return
+
     folder_id = db.get_folder_id(message.from_user.id, folder_name)
-    
     name = message.text.strip()
     db.add_file(folder_id, data['last_file_id'], data['last_file_type'], name, data.get('last_caption'))
     
-    await message.answer(f"✅ Файл '{name}' сохранен в '{folder_name}'!", reply_markup=get_folder_kb(folder_name))
+    await message.answer(f"✅ Файл '{name}' сохранен в '{folder_name}'!", reply_markup=get_base_reply_kb())
+    await message.answer(f"📁 Папка: {folder_name}", reply_markup=get_folder_kb(folder_name))
     await state.clear()
 
 @dp.callback_query(F.data.startswith("files_in:"))
@@ -171,7 +208,7 @@ async def list_files(callback: CallbackQuery):
     files = db.get_files_in_folder(folder_id)
     
     if not files:
-        await callback.answer("Пусто 💨", show_alert=True)
+        await callback.answer("В этой папке пока пусто 💨", show_alert=True)
         return
 
     builder = InlineKeyboardBuilder()
@@ -202,7 +239,9 @@ async def file_menu(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("f_view:"))
 async def view_file_item(callback: CallbackQuery):
     file_id_pk = int(callback.data.split(":")[1])
-    f_id, f_type, name, caption = db.get_file_details(file_id_pk)
+    details = db.get_file_details(file_id_pk)
+    if not details: return
+    f_id, f_type, name, caption = details
     
     try:
         if f_type == "photo": await callback.message.answer_photo(f_id, caption=caption)
@@ -224,7 +263,7 @@ async def ask_file_rename(callback: CallbackQuery, state: FSMContext):
 async def process_file_rename(message: Message, state: FSMContext):
     data = await state.get_data()
     db.rename_file(data['edit_file_id'], message.text.strip())
-    await message.answer("✅ Файл переименован!", reply_markup=get_main_kb(message.from_user.id))
+    await message.answer("✅ Файл переименован!", reply_markup=get_base_reply_kb())
     await state.clear()
 
 @dp.callback_query(F.data.startswith("f_del:"))
@@ -232,11 +271,10 @@ async def delete_file_item(callback: CallbackQuery):
     file_id_pk = int(callback.data.split(":")[1])
     db.delete_file(file_id_pk)
     await callback.answer("🗑 Файл удален")
-    await callback.message.edit_text("🗂 Главное меню:", reply_markup=get_main_kb(callback.from_user.id))
+    await callback.message.edit_text("🗂 Твои папки:", reply_markup=get_main_kb(callback.from_user.id))
 
-# --- ПОИСК ---
 @dp.callback_query(F.data == "search")
-async def start_search(callback: CallbackQuery, state: FSMContext):
+async def start_search_btn(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🔍 Введите название файла для поиска:")
     await state.set_state(StorageStates.waiting_for_search)
 
@@ -244,7 +282,7 @@ async def start_search(callback: CallbackQuery, state: FSMContext):
 async def process_search(message: Message, state: FSMContext):
     results = db.search_files(message.from_user.id, message.text.strip())
     if not results:
-        await message.answer("Ничего не найдено 🤷‍♂️", reply_markup=get_main_kb(message.from_user.id))
+        await message.answer("Ничего не найдено 🤷‍♂️", reply_markup=get_base_reply_kb())
     else:
         builder = InlineKeyboardBuilder()
         for f_id, f_name, folder_name in results:
