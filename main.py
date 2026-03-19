@@ -201,6 +201,9 @@ async def save_file_final(message: Message, state: FSMContext):
     await message.answer(f"📁 Папка: {folder_name}", reply_markup=get_folder_kb(folder_name))
     await state.clear()
 
+from aiogram.utils.html import escape
+
+# ... внутри list_files ...
 @dp.callback_query(F.data.startswith("files_in:"))
 async def list_files(callback: CallbackQuery):
     folder_name = callback.data.split(":")[1]
@@ -208,13 +211,14 @@ async def list_files(callback: CallbackQuery):
     files = db.get_files_in_folder(folder_id)
     
     builder = InlineKeyboardBuilder()
+    safe_name = escape(folder_name)
     
     if not files:
         builder.button(text="➕ Добавить первый файл", callback_data=f"add_to:{folder_name}")
         builder.button(text="🔙 Назад", callback_data=f"folder:{folder_name}")
         builder.adjust(1)
-        await callback.message.edit_text(f"📁 Папка *{folder_name}* пока пуста 💨", 
-                                        parse_mode="Markdown", 
+        await callback.message.edit_text(f"📁 Папка <b>{safe_name}</b> пока пуста 💨", 
+                                        parse_mode="HTML", 
                                         reply_markup=builder.as_markup())
         await callback.answer()
         return
@@ -228,7 +232,10 @@ async def list_files(callback: CallbackQuery):
     builder.button(text="🔙 Назад", callback_data=f"folder:{folder_name}")
     builder.adjust(1)
     
-    await callback.message.edit_text(f"📦 Файлы в папке *{folder_name}*:", parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.message.edit_text(f"📦 Файлы в папке <b>{safe_name}</b>:", 
+                                    parse_mode="HTML", 
+                                    reply_markup=builder.as_markup())
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("f_item:"))
 async def file_menu(callback: CallbackQuery):
