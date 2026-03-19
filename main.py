@@ -56,8 +56,8 @@ def get_base_reply_kb():
 def get_main_kb(user_id):
     builder = InlineKeyboardBuilder()
     folders = db.get_folders(user_id)
-    for folder in folders:
-        builder.button(text=f"📁 {folder}", callback_data=f"folder:{folder}")
+    for folder, count in folders:
+        builder.button(text=f"📁 {folder} ({count})", callback_data=f"folder:{folder}")
     if not folders:
         builder.button(text="У вас пока нет папок 💨", callback_data="none")
     builder.adjust(1)
@@ -65,15 +65,26 @@ def get_main_kb(user_id):
 
 def get_folder_kb(folder_name):
     builder = InlineKeyboardBuilder()
-    builder.button(text="📤 Добавить файл", callback_data=f"add_to:{folder_name}")
-    builder.button(text="📂 Список файлов", callback_data=f"files_in:{folder_name}")
-    builder.button(text="✏️ Редактировать", callback_data=f"rename_folder:{folder_name}")
+    builder.button(text="📤 Добавить", callback_data=f"add_to:{folder_name}")
+    builder.button(text="📂 Файлы", callback_data=f"files_in:{folder_name}")
+    builder.button(text="✏️ Ред.", callback_data=f"rename_folder:{folder_name}")
     builder.button(text="🗑 Удалить", callback_data=f"delete_folder:{folder_name}")
     builder.button(text="🔙 Назад", callback_data="back_to_main")
     builder.adjust(2)
     return builder.as_markup()
 
 # --- ХЕНДЛЕРЫ ---
+
+@dp.callback_query(F.data == "none")
+async def none_callback(callback: CallbackQuery):
+    await callback.answer("Создайте папку с помощью кнопки снизу 👇")
+
+@dp.callback_query(F.data.startswith("delete_folder:"))
+async def delete_folder_cmd(callback: CallbackQuery):
+    folder_name = callback.data.split(":")[1]
+    db.delete_folder(callback.from_user.id, folder_name)
+    await callback.answer(f"🗑 Папка '{folder_name}' удалена")
+    await callback.message.edit_text("🗂 Ваши папки:", reply_markup=get_main_kb(callback.from_user.id))
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
@@ -196,11 +207,18 @@ async def list_files(callback: CallbackQuery):
     folder_id = db.get_folder_id(callback.from_user.id, folder_name)
     files = db.get_files_in_folder(folder_id)
     
+    builder = InlineKeyboardBuilder()
+    
     if not files:
-        await callback.answer("Пусто 💨", show_alert=True)
+        builder.button(text="➕ Добавить первый файл", callback_data=f"add_to:{folder_name}")
+        builder.button(text="🔙 Назад", callback_data=f"folder:{folder_name}")
+        builder.adjust(1)
+        await callback.message.edit_text(f"📁 Папка *{folder_name}* пока пуста 💨", 
+                                        parse_mode="Markdown", 
+                                        reply_markup=builder.as_markup())
+        await callback.answer()
         return
 
-    builder = InlineKeyboardBuilder()
     for f_id, f_name, f_type in files:
         icon = "🖼" if f_type == "photo" else "🎥" if f_type == "video" else "📄"
         if f_type == "text": icon = "✍️"
@@ -216,26 +234,35 @@ async def list_files(callback: CallbackQuery):
 async def file_menu(callback: CallbackQuery):
     file_id_pk = int(callback.data.split(":")[1])
     details = db.get_file_details(file_id_pk)
-    if not details: return
-    f_id, f_type, name, caption = details
+    if not details: 
+        await callback.answer("Файл не найден ❌")
+        return
+    f_id, f_type, name, caption, folder_name = details
     
     builder = InlineKeyboardBuilder()
     builder.button(text="👁 Посмотреть", callback_data=f"f_view:{file_id_pk}")
     builder.button(text="✏️ Переименовать", callback_data=f"f_rename:{file_id_pk}")
     builder.button(text="🗑 Удалить", callback_data=f"f_del:{file_id_pk}")
-    builder.button(text="🔙 Назад", callback_data="back_to_main")
-    builder.adjust(2)
+    builder.button(text=f"🔙 В папку {folder_name}", callback_data=f"files_in:{folder_name}")
+    builder.button(text="🏠 Главная", callback_data="back_to_main")
+    builder.adjust(2, 2, 1)
 
-    await callback.message.edit_text(f"📄 Файл: *{name}*\nТип: {f_type}", parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.message.edit_text(f"📄 Файл: *{name}*\n📁 Папка: *{folder_name}*\nТип: {f_type}", 
+                                    parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("f_view:"))
 async def view_file_item(callback: CallbackQuery):
     file_id_pk = int(callback.data.split(":")[1])
     details = db.get_file_details(file_id_pk)
-    if not details: return
-    f_id, f_type, name, caption = details
+    if not details: 
+        await callback.answer("Файл не найден ❌", show_alert=True)
+        return
+        
+    # ПЯТЬ переменных вместо четырех, так как в database.py возвращается еще и имя папки
+    f_id, f_type, name, caption, folder_name = details
     
     try:
+        await callback.answer("Открываю...")
         if f_type == "photo": await callback.message.answer_photo(f_id, caption=caption)
         elif f_type == "video": await callback.message.answer_video(f_id, caption=caption)
         elif f_type == "document": await callback.message.answer_document(f_id, caption=caption)
@@ -269,9 +296,26 @@ async def process_file_rename(message: Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("f_del:"))
 async def delete_file_item(callback: CallbackQuery):
     file_id_pk = int(callback.data.split(":")[1])
+    details = db.get_file_details(file_id_pk)
     db.delete_file(file_id_pk)
     await callback.answer("🗑 Удалено")
-    await callback.message.edit_text("🗂 Ваши папки:", reply_markup=get_main_kb(callback.from_user.id))
+    if details:
+        folder_name = details[4]
+        await callback.message.edit_text(f"🗑 Файл удален из папки *{folder_name}*", 
+                                        parse_mode="Markdown", 
+                                        reply_markup=get_folder_kb(folder_name))
+    else:
+        await callback.message.edit_text("🗂 Ваши папки:", reply_markup=get_main_kb(callback.from_user.id))
+
+@dp.error()
+async def error_handler(event: types.ErrorEvent):
+    logger.error(f"Update {event.update} caused error: {event.exception}")
+    try:
+        if event.update.message:
+            await event.update.message.answer("⚠️ Ошибка. Попробуйте еще раз или проверьте соединение.")
+        elif event.update.callback_query:
+            await event.update.callback_query.answer("⚠️ Ошибка базы данных", show_alert=True)
+    except: pass
 
 @dp.message(StorageStates.waiting_for_search)
 async def process_search(message: Message, state: FSMContext):
@@ -280,8 +324,12 @@ async def process_search(message: Message, state: FSMContext):
         await message.answer("Ничего не найдено 🤷‍♂️", reply_markup=get_base_reply_kb())
     else:
         builder = InlineKeyboardBuilder()
-        for f_id, f_name, folder_name in results:
-            builder.button(text=f"📄 {f_name} (в {folder_name})", callback_data=f"f_item:{f_id}")
+        for f_pk, f_name, folder_name, f_type in results:
+            icon = "🖼" if f_type == "photo" else "🎥" if f_type == "video" else "📄"
+            if f_type == "text": icon = "✍️"
+            elif f_type == "voice": icon = "🎤"
+            elif f_type == "video_note": icon = "🔘"
+            builder.button(text=f"{icon} {f_name} (📁 {folder_name})", callback_data=f"f_item:{f_pk}")
         builder.button(text="🔙 Назад", callback_data="back_to_main")
         builder.adjust(1)
         await message.answer(f"🔍 Найдено {len(results)} результатов:", reply_markup=builder.as_markup())

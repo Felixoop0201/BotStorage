@@ -16,13 +16,23 @@ except Exception as e:
     connection_pool = None
 
 def get_connection():
-    return connection_pool.getconn()
+    try:
+        if connection_pool:
+            return connection_pool.getconn()
+    except Exception as e:
+        logging.error(f"Ошибка получения соединения: {e}")
+    return None
 
 def put_connection(conn):
-    connection_pool.putconn(conn)
+    if connection_pool and conn:
+        try:
+            connection_pool.putconn(conn)
+        except Exception as e:
+            logging.error(f"Ошибка возврата соединения: {e}")
 
 def init_db():
     conn = get_connection()
+    if not conn: return
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
@@ -50,6 +60,7 @@ def init_db():
 # --- Функции Папок ---
 def create_folder(user_id, name):
     conn = get_connection()
+    if not conn: return False
     try:
         with conn.cursor() as cursor:
             cursor.execute('INSERT INTO folders (user_id, name) VALUES (%s, %s)', (user_id, name))
@@ -63,15 +74,25 @@ def create_folder(user_id, name):
 
 def get_folders(user_id):
     conn = get_connection()
+    if not conn: return []
     try:
         with conn.cursor() as cursor:
-            cursor.execute('SELECT name FROM folders WHERE user_id = %s ORDER BY name', (user_id,))
-            return [row[0] for row in rows] if (rows := cursor.fetchall()) else []
+            cursor.execute('''
+                SELECT f.name, COUNT(fi.id) 
+                FROM folders f 
+                LEFT JOIN files fi ON f.id = fi.folder_id 
+                WHERE f.user_id = %s 
+                GROUP BY f.id, f.name 
+                ORDER BY f.name
+            ''', (user_id,))
+            rows = cursor.fetchall()
+            return rows if rows else []
     finally:
         put_connection(conn)
 
 def rename_folder(user_id, old_name, new_name):
     conn = get_connection()
+    if not conn: return False
     try:
         with conn.cursor() as cursor:
             cursor.execute('UPDATE folders SET name = %s WHERE user_id = %s AND name = %s', (new_name, user_id, old_name))
@@ -85,6 +106,7 @@ def rename_folder(user_id, old_name, new_name):
 
 def delete_folder(user_id, name):
     conn = get_connection()
+    if not conn: return
     try:
         with conn.cursor() as cursor:
             cursor.execute('DELETE FROM folders WHERE user_id = %s AND name = %s', (user_id, name))
@@ -94,6 +116,7 @@ def delete_folder(user_id, name):
 
 def get_folder_id(user_id, name):
     conn = get_connection()
+    if not conn: return None
     try:
         with conn.cursor() as cursor:
             cursor.execute('SELECT id FROM folders WHERE user_id = %s AND name = %s', (user_id, name))
@@ -105,6 +128,7 @@ def get_folder_id(user_id, name):
 # --- Функции Файлов ---
 def add_file(folder_id, file_id, file_type, name, caption=None):
     conn = get_connection()
+    if not conn: return
     try:
         with conn.cursor() as cursor:
             cursor.execute('INSERT INTO files (folder_id, file_id, file_type, name, caption) VALUES (%s, %s, %s, %s, %s)', 
@@ -115,6 +139,7 @@ def add_file(folder_id, file_id, file_type, name, caption=None):
 
 def get_files_in_folder(folder_id):
     conn = get_connection()
+    if not conn: return []
     try:
         with conn.cursor() as cursor:
             cursor.execute('SELECT id, name, file_type FROM files WHERE folder_id = %s ORDER BY id DESC', (folder_id,))
@@ -124,15 +149,22 @@ def get_files_in_folder(folder_id):
 
 def get_file_details(file_id_pk):
     conn = get_connection()
+    if not conn: return None
     try:
         with conn.cursor() as cursor:
-            cursor.execute('SELECT file_id, file_type, name, caption FROM files WHERE id = %s', (file_id_pk,))
+            cursor.execute('''
+                SELECT f.file_id, f.file_type, f.name, f.caption, fo.name 
+                FROM files f 
+                JOIN folders fo ON f.folder_id = fo.id 
+                WHERE f.id = %s
+            ''', (file_id_pk,))
             return cursor.fetchone()
     finally:
         put_connection(conn)
 
 def rename_file(file_id_pk, new_name):
     conn = get_connection()
+    if not conn: return
     try:
         with conn.cursor() as cursor:
             cursor.execute('UPDATE files SET name = %s WHERE id = %s', (new_name, file_id_pk))
@@ -142,19 +174,21 @@ def rename_file(file_id_pk, new_name):
 
 def delete_file(file_id_pk):
     conn = get_connection()
+    if not conn: return
     try:
         with conn.cursor() as cursor:
-            cursor.execute('DELETE FROM files WHERE id = %s', (file_id_pk))
+            cursor.execute('DELETE FROM files WHERE id = %s', (file_id_pk,))
             conn.commit()
     finally:
         put_connection(conn)
 
 def search_files(user_id, query):
     conn = get_connection()
+    if not conn: return []
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
-                SELECT f.id, f.name, fo.name 
+                SELECT f.id, f.name, fo.name, f.file_type 
                 FROM files f 
                 JOIN folders fo ON f.folder_id = fo.id 
                 WHERE fo.user_id = %s AND f.name ILIKE %s
