@@ -8,9 +8,10 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Используем ThreadedConnectionPool для работы в многопоточном режиме
 try:
-    connection_pool = psycopg2.pool.SimpleConnectionPool(1, 10, DATABASE_URL)
-    logging.info("✅ Успешное подключение к облачной базе PostgreSQL")
+    connection_pool = psycopg2.pool.ThreadedConnectionPool(1, 20, DATABASE_URL)
+    logging.info("✅ Успешное подключение к пулу потоков PostgreSQL")
 except Exception as e:
     logging.error(f"❌ Ошибка подключения к базе: {e}")
     connection_pool = None

@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.utils.html import escape
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +34,8 @@ logger = logging.getLogger(__name__)
 # --- ИНИЦИАЛИЗАЦИЯ БОТА ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# Инициализация БД (синхронно при старте - это ок)
 db.init_db()
 
 # --- СОСТОЯНИЯ (FSM) ---
@@ -53,11 +56,13 @@ def get_base_reply_kb():
     builder.row(KeyboardButton(text="🔍 Поиск файла"), KeyboardButton(text="ℹ️ Помощь"))
     return builder.as_markup(resize_keyboard=True)
 
-def get_main_kb(user_id):
+async def get_main_kb(user_id):
     builder = InlineKeyboardBuilder()
-    folders = db.get_folders(user_id)
+    # Выносим в поток, чтобы не блокировать event loop
+    folders = await asyncio.to_thread(db.get_folders, user_id)
     for folder, count in folders:
-        builder.button(text=f"📁 {folder} ({count})", callback_data=f"folder:{folder}")
+        safe_name = escape(folder)
+        builder.button(text=f"📁 {safe_name} ({count})", callback_data=f"folder:{folder}")
     if not folders:
         builder.button(text="У вас пока нет папок 💨", callback_data="none")
     builder.adjust(1)
@@ -82,21 +87,21 @@ async def none_callback(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("delete_folder:"))
 async def delete_folder_cmd(callback: CallbackQuery):
     folder_name = callback.data.split(":")[1]
-    db.delete_folder(callback.from_user.id, folder_name)
-    await callback.answer(f"🗑 Папка '{folder_name}' удалена")
-    await callback.message.edit_text("🗂 Ваши папки:", reply_markup=get_main_kb(callback.from_user.id))
+    await asyncio.to_thread(db.delete_folder, callback.from_user.id, folder_name)
+    await callback.answer(f"🗑 Папка удалена")
+    await callback.message.edit_text("🗂 Ваши папки:", reply_markup=await get_main_kb(callback.from_user.id))
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("👋 Добро пожаловать в CloudBox!\n\nВаше личное облако. Поддерживает текст, фото, видео, кружочки и файлы.", 
                          reply_markup=get_base_reply_kb())
-    await message.answer("🗂 Ваши папки:", reply_markup=get_main_kb(message.from_user.id))
+    await message.answer("🗂 Ваши папки:", reply_markup=await get_main_kb(message.from_user.id))
 
 @dp.message(F.text == "🗂 Мои папки")
 async def show_folders_text(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("🗂 Ваши папки:", reply_markup=get_main_kb(message.from_user.id))
+    await message.answer("🗂 Ваши папки:", reply_markup=await get_main_kb(message.from_user.id))
 
 @dp.message(F.text == "➕ Создать папку")
 async def create_folder_text(message: Message, state: FSMContext):
@@ -111,27 +116,30 @@ async def search_file_text(message: Message, state: FSMContext):
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_text(message: Message):
     help_msg = (
-        "📖 *Возможности CloudBox:*\n\n"
-        "✅ *Любые файлы:* Текст, фото, видео, голосовые, кружочки, музыка.\n"
-        "📁 *Организация:* Создавайте папки и переименовывайте их.\n"
-        "🛡 *Безопасность:* Ваши данные хранятся в облаке Neon.\n"
-        "🔍 *Поиск:* Находите файлы по имени во всех папках.\n\n"
+        "<b>📖 Возможности CloudBox:</b>\n\n"
+        "✅ <b>Любые файлы:</b> Текст, фото, видео, голосовые, кружочки, музыка.\n"
+        "📁 <b>Организация:</b> Создавайте папки и переименовывайте их.\n"
+        "🛡 <b>Безопасность:</b> Ваши данные хранятся в облаке Neon.\n"
+        "🔍 <b>Поиск:</b> Находите файлы по имени во всех папках.\n\n"
         "Чтобы сохранить что-то, зайдите в папку и нажмите кнопку 'Добавить файл'."
     )
-    await message.answer(help_msg, parse_mode="Markdown")
+    await message.answer(help_msg, parse_mode="HTML")
 
 @dp.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("🗂 Ваши папки:", reply_markup=get_main_kb(callback.from_user.id))
+    await callback.message.edit_text("🗂 Ваши папки:", reply_markup=await get_main_kb(callback.from_user.id))
 
 # --- ЛОГИКА ПАПОК ---
 
 @dp.message(StorageStates.waiting_for_folder_name)
 async def process_create_folder(message: Message, state: FSMContext):
     name = message.text.strip()
-    if db.create_folder(message.from_user.id, name):
-        await message.answer(f"✅ Папка '{name}' создана!", reply_markup=get_main_kb(message.from_user.id))
+    success = await asyncio.to_thread(db.create_folder, message.from_user.id, name)
+    if success:
+        await message.answer(f"✅ Папка '<b>{escape(name)}</b>' создана!", 
+                             parse_mode="HTML",
+                             reply_markup=await get_main_kb(message.from_user.id))
         await state.clear()
     else:
         await message.answer("❌ Ошибка: такая папка уже существует.")
@@ -139,21 +147,22 @@ async def process_create_folder(message: Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("folder:"))
 async def open_folder(callback: CallbackQuery):
     folder_name = callback.data.split(":")[1]
-    await callback.message.edit_text(f"📁 Папка: *{folder_name}*", parse_mode="Markdown", reply_markup=get_folder_kb(folder_name))
+    await callback.message.edit_text(f"📁 Папка: <b>{escape(folder_name)}</b>", 
+                                    parse_mode="HTML", 
+                                    reply_markup=get_folder_kb(folder_name))
 
-# --- ЛОГИКА ФАЙЛОВ (ОБНОВЛЕННАЯ) ---
+# --- ЛОГИКА ФАЙЛОВ ---
 
 @dp.callback_query(F.data.startswith("add_to:"))
 async def ask_file(callback: CallbackQuery, state: FSMContext):
     folder_name = callback.data.split(":")[1]
     await state.update_data(current_folder=folder_name)
-    await callback.message.edit_text(f"🖇 *Папка: {folder_name}*\n\nОтправьте мне что угодно: текст, фото, видео, голосовое или кружочек.", parse_mode="Markdown")
+    await callback.message.edit_text(f"🖇 <b>Папка: {escape(folder_name)}</b>\n\nОтправьте мне что угодно: текст, фото, видео, голосовое или кружочек.", parse_mode="HTML")
     await state.set_state(StorageStates.waiting_for_file)
 
 @dp.message(StorageStates.waiting_for_file)
 async def handle_incoming_file(message: Message, state: FSMContext):
-    file_id = None
-    f_type = None
+    file_id, f_type = None, None
     
     if message.photo: file_id, f_type = message.photo[-1].file_id, "photo"
     elif message.video: file_id, f_type = message.video.file_id, "video"
@@ -163,8 +172,7 @@ async def handle_incoming_file(message: Message, state: FSMContext):
     elif message.video_note: file_id, f_type = message.video_note.file_id, "video_note"
     elif message.animation: file_id, f_type = message.animation.file_id, "animation"
     elif message.sticker: file_id, f_type = message.sticker.file_id, "sticker"
-    elif message.text: 
-        file_id, f_type = message.text, "text"
+    elif message.text: file_id, f_type = message.text, "text"
     
     if not file_id:
         await message.answer("❌ Я не смог распознать этот объект.")
@@ -172,15 +180,14 @@ async def handle_incoming_file(message: Message, state: FSMContext):
 
     data = await state.get_data()
     folder_name = data['current_folder']
-    
     await state.update_data(last_file_id=file_id, last_file_type=f_type, last_caption=message.caption)
     
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Да, сохранить", callback_data="confirm_save")
     builder.button(text="❌ Отмена", callback_data="back_to_main")
     
-    await message.answer(f"📦 Объект получен. Сохранить его в папку *{folder_name}*?", 
-                         parse_mode="Markdown", reply_markup=builder.as_markup())
+    await message.answer(f"📦 Объект получен. Сохранить его в папку <b>{escape(folder_name)}</b>?", 
+                         parse_mode="HTML", reply_markup=builder.as_markup())
     await state.set_state(StorageStates.waiting_for_save_confirm)
 
 @dp.callback_query(F.data == "confirm_save")
@@ -192,34 +199,33 @@ async def ask_file_name_final(callback: CallbackQuery, state: FSMContext):
 async def save_file_final(message: Message, state: FSMContext):
     data = await state.get_data()
     folder_name = data.get('current_folder')
-    folder_id = db.get_folder_id(message.from_user.id, folder_name)
+    
+    folder_id = await asyncio.to_thread(db.get_folder_id, message.from_user.id, folder_name)
     name = message.text.strip()
     
-    db.add_file(folder_id, data['last_file_id'], data['last_file_type'], name, data.get('last_caption'))
+    await asyncio.to_thread(db.add_file, folder_id, data['last_file_id'], data['last_file_type'], name, data.get('last_caption'))
     
-    await message.answer(f"✅ Сохранено под именем '{name}'!", reply_markup=get_base_reply_kb())
-    await message.answer(f"📁 Папка: {folder_name}", reply_markup=get_folder_kb(folder_name))
+    await message.answer(f"✅ Сохранено под именем '<b>{escape(name)}</b>'!", 
+                         parse_mode="HTML", reply_markup=get_base_reply_kb())
+    await message.answer(f"📁 Папка: {escape(folder_name)}", 
+                         parse_mode="HTML", reply_markup=get_folder_kb(folder_name))
     await state.clear()
 
-from aiogram.utils.html import escape
-
-# ... внутри list_files ...
 @dp.callback_query(F.data.startswith("files_in:"))
 async def list_files(callback: CallbackQuery):
     folder_name = callback.data.split(":")[1]
-    folder_id = db.get_folder_id(callback.from_user.id, folder_name)
-    files = db.get_files_in_folder(folder_id)
+    folder_id = await asyncio.to_thread(db.get_folder_id, callback.from_user.id, folder_name)
+    files = await asyncio.to_thread(db.get_files_in_folder, folder_id)
     
     builder = InlineKeyboardBuilder()
-    safe_name = escape(folder_name)
+    safe_folder = escape(folder_name)
     
     if not files:
-        builder.button(text="➕ Добавить первый файл", callback_data=f"add_to:{folder_name}")
+        builder.button(text="➕ Добавить файл", callback_data=f"add_to:{folder_name}")
         builder.button(text="🔙 Назад", callback_data=f"folder:{folder_name}")
         builder.adjust(1)
-        await callback.message.edit_text(f"📁 Папка <b>{safe_name}</b> пока пуста 💨", 
-                                        parse_mode="HTML", 
-                                        reply_markup=builder.as_markup())
+        await callback.message.edit_text(f"📁 Папка <b>{safe_folder}</b> пока пуста 💨", 
+                                        parse_mode="HTML", reply_markup=builder.as_markup())
         await callback.answer()
         return
 
@@ -228,19 +234,18 @@ async def list_files(callback: CallbackQuery):
         if f_type == "text": icon = "✍️"
         elif f_type == "voice": icon = "🎤"
         elif f_type == "video_note": icon = "🔘"
-        builder.button(text=f"{icon} {f_name}", callback_data=f"f_item:{f_id}")
+        builder.button(text=f"{icon} {escape(f_name)}", callback_data=f"f_item:{f_id}")
     builder.button(text="🔙 Назад", callback_data=f"folder:{folder_name}")
     builder.adjust(1)
     
-    await callback.message.edit_text(f"📦 Файлы в папке <b>{safe_name}</b>:", 
-                                    parse_mode="HTML", 
-                                    reply_markup=builder.as_markup())
+    await callback.message.edit_text(f"📦 Файлы в папке <b>{safe_folder}</b>:", 
+                                    parse_mode="HTML", reply_markup=builder.as_markup())
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("f_item:"))
 async def file_menu(callback: CallbackQuery):
     file_id_pk = int(callback.data.split(":")[1])
-    details = db.get_file_details(file_id_pk)
+    details = await asyncio.to_thread(db.get_file_details, file_id_pk)
     if not details: 
         await callback.answer("Файл не найден ❌")
         return
@@ -250,22 +255,20 @@ async def file_menu(callback: CallbackQuery):
     builder.button(text="👁 Посмотреть", callback_data=f"f_view:{file_id_pk}")
     builder.button(text="✏️ Переименовать", callback_data=f"f_rename:{file_id_pk}")
     builder.button(text="🗑 Удалить", callback_data=f"f_del:{file_id_pk}")
-    builder.button(text=f"🔙 В папку {folder_name}", callback_data=f"files_in:{folder_name}")
+    builder.button(text=f"🔙 В папку {escape(folder_name)}", callback_data=f"files_in:{folder_name}")
     builder.button(text="🏠 Главная", callback_data="back_to_main")
     builder.adjust(2, 2, 1)
 
-    await callback.message.edit_text(f"📄 Файл: *{name}*\n📁 Папка: *{folder_name}*\nТип: {f_type}", 
-                                    parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.message.edit_text(f"📄 Файл: <b>{escape(name)}</b>\n📁 Папка: <b>{escape(folder_name)}</b>\nТип: {f_type}", 
+                                    parse_mode="HTML", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("f_view:"))
 async def view_file_item(callback: CallbackQuery):
     file_id_pk = int(callback.data.split(":")[1])
-    details = db.get_file_details(file_id_pk)
+    details = await asyncio.to_thread(db.get_file_details, file_id_pk)
     if not details: 
         await callback.answer("Файл не найден ❌", show_alert=True)
         return
-        
-    # ПЯТЬ переменных вместо четырех, так как в database.py возвращается еще и имя папки
     f_id, f_type, name, caption, folder_name = details
     
     try:
@@ -278,13 +281,10 @@ async def view_file_item(callback: CallbackQuery):
         elif f_type == "video_note": await callback.message.answer_video_note(f_id)
         elif f_type == "animation": await callback.message.answer_animation(f_id, caption=caption)
         elif f_type == "sticker": await callback.message.answer_sticker(f_id)
-        elif f_type == "text": await callback.message.answer(f"✍️ *Сохраненный текст:*\n\n{f_id}", parse_mode="Markdown")
-        await callback.answer()
+        elif f_type == "text": await callback.message.answer(f"✍️ <b>Сохраненный текст:</b>\n\n{escape(f_id)}", parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error sending file: {e}")
         await callback.answer("Ошибка при открытии", show_alert=True)
-
-# (Остальные хендлеры ренейма и поиска остаются такими же)
 
 @dp.callback_query(F.data.startswith("f_rename:"))
 async def ask_file_rename(callback: CallbackQuery, state: FSMContext):
@@ -296,37 +296,26 @@ async def ask_file_rename(callback: CallbackQuery, state: FSMContext):
 @dp.message(StorageStates.waiting_for_file_rename)
 async def process_file_rename(message: Message, state: FSMContext):
     data = await state.get_data()
-    db.rename_file(data['edit_file_id'], message.text.strip())
+    await asyncio.to_thread(db.rename_file, data['edit_file_id'], message.text.strip())
     await message.answer("✅ Имя файла изменено!", reply_markup=get_base_reply_kb())
     await state.clear()
 
 @dp.callback_query(F.data.startswith("f_del:"))
 async def delete_file_item(callback: CallbackQuery):
     file_id_pk = int(callback.data.split(":")[1])
-    details = db.get_file_details(file_id_pk)
-    db.delete_file(file_id_pk)
+    details = await asyncio.to_thread(db.get_file_details, file_id_pk)
+    await asyncio.to_thread(db.delete_file, file_id_pk)
     await callback.answer("🗑 Удалено")
     if details:
         folder_name = details[4]
-        await callback.message.edit_text(f"🗑 Файл удален из папки *{folder_name}*", 
-                                        parse_mode="Markdown", 
-                                        reply_markup=get_folder_kb(folder_name))
+        await callback.message.edit_text(f"🗑 Файл удален из папки <b>{escape(folder_name)}</b>", 
+                                        parse_mode="HTML", reply_markup=get_folder_kb(folder_name))
     else:
-        await callback.message.edit_text("🗂 Ваши папки:", reply_markup=get_main_kb(callback.from_user.id))
-
-@dp.error()
-async def error_handler(event: types.ErrorEvent):
-    logger.error(f"Update {event.update} caused error: {event.exception}")
-    try:
-        if event.update.message:
-            await event.update.message.answer("⚠️ Ошибка. Попробуйте еще раз или проверьте соединение.")
-        elif event.update.callback_query:
-            await event.update.callback_query.answer("⚠️ Ошибка базы данных", show_alert=True)
-    except: pass
+        await callback.message.edit_text("🗂 Ваши папки:", reply_markup=await get_main_kb(callback.from_user.id))
 
 @dp.message(StorageStates.waiting_for_search)
 async def process_search(message: Message, state: FSMContext):
-    results = db.search_files(message.from_user.id, message.text.strip())
+    results = await asyncio.to_thread(db.search_files, message.from_user.id, message.text.strip())
     if not results:
         await message.answer("Ничего не найдено 🤷‍♂️", reply_markup=get_base_reply_kb())
     else:
@@ -339,14 +328,15 @@ async def process_search(message: Message, state: FSMContext):
             builder.button(text=f"{icon} {f_name} (📁 {folder_name})", callback_data=f"f_item:{f_pk}")
         builder.button(text="🔙 Назад", callback_data="back_to_main")
         builder.adjust(1)
-        await message.answer(f"🔍 Найдено {len(results)} результатов:", reply_markup=builder.as_markup())
+        await message.answer(f"🔍 Найдено <b>{len(results)}</b> результатов:", 
+                             parse_mode="HTML", reply_markup=builder.as_markup())
     await state.clear()
 
 @dp.callback_query(F.data.startswith("rename_folder:"))
 async def ask_rename_folder(callback: CallbackQuery, state: FSMContext):
     folder_name = callback.data.split(":")[1]
     await state.update_data(old_folder_name=folder_name)
-    await callback.message.edit_text(f"✏️ Введите новое название для папки *{folder_name}*:", parse_mode="Markdown")
+    await callback.message.edit_text(f"✏️ Введите новое название для папки <b>{escape(folder_name)}</b>:", parse_mode="HTML")
     await state.set_state(StorageStates.waiting_for_folder_rename)
 
 @dp.message(StorageStates.waiting_for_folder_rename)
@@ -354,11 +344,23 @@ async def process_rename_folder(message: Message, state: FSMContext):
     data = await state.get_data()
     old_name = data['old_folder_name']
     new_name = message.text.strip()
-    if db.rename_folder(message.from_user.id, old_name, new_name):
-        await message.answer(f"✅ Папка переименована в '{new_name}'!", reply_markup=get_main_kb(message.from_user.id))
+    success = await asyncio.to_thread(db.rename_folder, message.from_user.id, old_name, new_name)
+    if success:
+        await message.answer(f"✅ Папка переименована в '<b>{escape(new_name)}</b>'!", 
+                             parse_mode="HTML", reply_markup=await get_main_kb(message.from_user.id))
         await state.clear()
     else:
         await message.answer("❌ Ошибка при переименовании.")
+
+@dp.error()
+async def error_handler(event: types.ErrorEvent):
+    logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: {event.exception}", exc_info=True)
+    try:
+        if event.update.callback_query:
+            await event.update.callback_query.answer("⚠️ Ошибка базы данных или соединения", show_alert=True)
+        elif event.update.message:
+            await event.update.message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
+    except: pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
