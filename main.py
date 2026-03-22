@@ -70,6 +70,8 @@ async def get_main_reply_kb(user_id):
 async def get_folder_reply_kb(user_id, folder_name):
     builder = ReplyKeyboardBuilder()
     folder_id = await asyncio.to_thread(db.get_folder_id, user_id, folder_name)
+    if folder_id is None: return await get_main_reply_kb(user_id)
+    
     files = await asyncio.to_thread(db.get_files_in_folder, folder_id)
     
     for _, f_name, f_type in files:
@@ -104,7 +106,7 @@ def get_folder_settings_kb():
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("👋 Добро пожаловать в CloudBox!\n\nВаше личное структурированное облако. Все папки и файлы теперь доступны прямо на клавиатуре.", 
+    await message.answer("👋 Добро пожаловать в Облачное Хранилище!\n\nВсе ваши папки и файлы теперь доступны прямо на кнопках снизу.", 
                          reply_markup=await get_main_reply_kb(message.from_user.id))
     await state.set_state(StorageStates.main_menu)
 
@@ -112,6 +114,7 @@ async def start_cmd(message: Message, state: FSMContext):
 
 @dp.message(F.text == "🔙 Назад", StorageStates.inside_folder)
 @dp.message(F.text == "🔙 Назад", StorageStates.waiting_for_folder_name)
+@dp.message(F.text == "🔙 Назад", StorageStates.waiting_for_search)
 async def back_to_main(message: Message, state: FSMContext):
     await state.set_state(StorageStates.main_menu)
     await message.answer("🗂 Главное меню:", reply_markup=await get_main_reply_kb(message.from_user.id))
@@ -120,6 +123,8 @@ async def back_to_main(message: Message, state: FSMContext):
 async def back_to_folder(message: Message, state: FSMContext):
     data = await state.get_data()
     folder_name = data.get("current_folder")
+    if not folder_name: return await back_to_main(message, state)
+    
     await state.set_state(StorageStates.inside_folder)
     await message.answer(f"📁 Папка: <b>{escape(folder_name)}</b>", 
                          parse_mode="HTML", 
@@ -129,13 +134,16 @@ async def back_to_folder(message: Message, state: FSMContext):
 
 @dp.message(F.text == "➕ Создать папку")
 async def create_folder_init(message: Message, state: FSMContext):
-    await message.answer("✍️ Введите название для новой папки:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔙 Назад")]], resize_keyboard=True))
+    await message.answer("✍️ Введите название для новой папки:", 
+                         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔙 Назад")]], resize_keyboard=True))
     await state.set_state(StorageStates.waiting_for_folder_name)
 
 @dp.message(StorageStates.waiting_for_folder_name)
 async def process_create_folder(message: Message, state: FSMContext):
     if message.text == "🔙 Назад": return await back_to_main(message, state)
     name = message.text.strip()
+    if not name: return
+    
     success = await asyncio.to_thread(db.create_folder, message.from_user.id, name)
     if success:
         await message.answer(f"✅ Папка '<b>{escape(name)}</b>' создана!", 
@@ -143,7 +151,7 @@ async def process_create_folder(message: Message, state: FSMContext):
                              reply_markup=await get_main_reply_kb(message.from_user.id))
         await state.set_state(StorageStates.main_menu)
     else:
-        await message.answer("❌ Ошибка: такая папка уже существует.")
+        await message.answer("❌ Ошибка: такая папка уже существует или введено некорректное имя.")
 
 @dp.message(F.text.startswith("📁 "), StorageStates.main_menu)
 async def open_folder(message: Message, state: FSMContext):
@@ -158,6 +166,8 @@ async def open_folder(message: Message, state: FSMContext):
 async def folder_settings(message: Message, state: FSMContext):
     data = await state.get_data()
     folder_name = data.get("current_folder")
+    if not folder_name: return await back_to_main(message, state)
+    
     await message.answer(f"⚙️ Настройки папки <b>{escape(folder_name)}</b>:", 
                          parse_mode="HTML", 
                          reply_markup=get_folder_settings_kb())
@@ -166,6 +176,8 @@ async def folder_settings(message: Message, state: FSMContext):
 async def delete_folder_confirm(message: Message, state: FSMContext):
     data = await state.get_data()
     folder_name = data.get("current_folder")
+    if not folder_name: return await back_to_main(message, state)
+    
     await asyncio.to_thread(db.delete_folder, message.from_user.id, folder_name)
     await message.answer(f"🗑 Папка '{escape(folder_name)}' удалена.", reply_markup=await get_main_reply_kb(message.from_user.id))
     await state.set_state(StorageStates.main_menu)
@@ -180,6 +192,8 @@ async def process_rename_folder(message: Message, state: FSMContext):
     data = await state.get_data()
     old_name = data.get("current_folder")
     new_name = message.text.strip()
+    if not old_name or not new_name: return
+    
     success = await asyncio.to_thread(db.rename_folder, message.from_user.id, old_name, new_name)
     if success:
         await state.update_data(current_folder=new_name)
@@ -187,7 +201,7 @@ async def process_rename_folder(message: Message, state: FSMContext):
                              parse_mode="HTML", reply_markup=await get_folder_reply_kb(message.from_user.id, new_name))
         await state.set_state(StorageStates.inside_folder)
     else:
-        await message.answer("❌ Ошибка при переименовании.")
+        await message.answer("❌ Ошибка при переименовании. Возможно имя уже занято.")
 
 # --- ЛОГИКА ФАЙЛОВ ---
 
@@ -195,7 +209,9 @@ async def process_rename_folder(message: Message, state: FSMContext):
 async def ask_file(message: Message, state: FSMContext):
     data = await state.get_data()
     folder_name = data.get("current_folder")
-    await message.answer(f"🖇 <b>Папка: {escape(folder_name)}</b>\n\nОтправьте файл, фото, видео или текст:", 
+    if not folder_name: return await back_to_main(message, state)
+    
+    await message.answer(f"🖇 <b>Папка: {escape(folder_name)}</b>\n\nОтправьте файл, фото, видео или просто текст:", 
                          parse_mode="HTML", 
                          reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔙 Назад")]], resize_keyboard=True))
     await state.set_state(StorageStates.waiting_for_file)
@@ -219,24 +235,35 @@ async def handle_incoming_file(message: Message, state: FSMContext):
     elif message.text: file_id, f_type = message.text, "text"
     
     if not file_id:
-        await message.answer("❌ Не удалось распознать файл.")
+        await message.answer("❌ Не удалось распознать формат. Попробуйте отправить другой файл.")
         return
 
     await state.update_data(last_file_id=file_id, last_file_type=f_type, last_caption=message.caption)
-    await message.answer("✍️ Придумайте название для файла:")
+    await message.answer("✍️ Придумайте название для этого файла:")
     await state.set_state(StorageStates.waiting_for_file_name)
 
 @dp.message(StorageStates.waiting_for_file_name)
 async def save_file_final(message: Message, state: FSMContext):
+    if message.text == "🔙 Назад": return await back_to_main(message, state)
+    
     data = await state.get_data()
     folder_name = data.get('current_folder')
+    last_file_id = data.get('last_file_id')
+    
+    if not folder_name or not last_file_id:
+        await message.answer("❌ Ошибка: сессия истекла. Пожалуйста, начните заново.", reply_markup=await get_main_reply_kb(message.from_user.id))
+        await state.set_state(StorageStates.main_menu)
+        return
+
     folder_id = await asyncio.to_thread(db.get_folder_id, message.from_user.id, folder_name)
+    if not folder_id:
+        await message.answer("❌ Папка не найдена. Возможно она была удалена.")
+        return await back_to_main(message, state)
+
     name = message.text.strip()
+    await asyncio.to_thread(db.add_file, folder_id, last_file_id, data['last_file_type'], name, data.get('last_caption'))
     
-    await asyncio.to_thread(db.add_file, folder_id, data['last_file_id'], data['last_file_type'], name, data.get('last_caption'))
-    
-    await message.answer(f"✅ Сохранено под именем '<b>{escape(name)}</b>'!", 
-                         parse_mode="HTML")
+    await message.answer(f"✅ Успешно сохранено как '<b>{escape(name)}</b>'!", parse_mode="HTML")
     await message.answer(f"📁 Папка: {escape(folder_name)}", 
                          parse_mode="HTML", reply_markup=await get_folder_reply_kb(message.from_user.id, folder_name))
     await state.set_state(StorageStates.inside_folder)
@@ -246,9 +273,9 @@ async def open_file_menu(message: Message, state: FSMContext):
     f_name = message.text[2:].strip()
     data = await state.get_data()
     folder_name = data.get("current_folder")
-    folder_id = await asyncio.to_thread(db.get_folder_id, message.from_user.id, folder_name)
+    if not folder_name: return await back_to_main(message, state)
     
-    # Находим файл по имени в текущей папке
+    folder_id = await asyncio.to_thread(db.get_folder_id, message.from_user.id, folder_name)
     files = await asyncio.to_thread(db.get_files_in_folder, folder_id)
     file_id_pk = next((f[0] for f in files if f[1] == f_name), None)
     
@@ -259,14 +286,16 @@ async def open_file_menu(message: Message, state: FSMContext):
                              parse_mode="HTML", 
                              reply_markup=get_file_action_kb())
     else:
-        await message.answer("❌ Файл не найден.")
+        await message.answer("❌ Файл не найден. Возможно, вы переименовали его.")
 
 @dp.message(F.text == "👁 Посмотреть", StorageStates.file_view)
 async def view_file(message: Message, state: FSMContext):
     data = await state.get_data()
     file_id_pk = data.get("current_file_id")
     details = await asyncio.to_thread(db.get_file_details, file_id_pk)
-    if not details: return
+    if not details: 
+        await message.answer("❌ Файл больше не существует.")
+        return await back_to_folder(message, state)
     
     f_id, f_type, name, caption, _ = details
     try:
@@ -278,7 +307,8 @@ async def view_file(message: Message, state: FSMContext):
         elif f_type == "video_note": await message.answer_video_note(f_id)
         elif f_type == "text": await message.answer(f"✍️ <b>Текст:</b>\n\n{escape(f_id)}", parse_mode="HTML")
     except Exception as e:
-        await message.answer("❌ Ошибка при отправке файла.")
+        logger.error(f"Error sending file: {e}")
+        await message.answer("❌ Ошибка при отправке файла из облака Telegram.")
 
 @dp.message(F.text == "🗑 Удалить", StorageStates.file_view)
 async def delete_file(message: Message, state: FSMContext):
@@ -300,6 +330,8 @@ async def process_file_rename(message: Message, state: FSMContext):
     data = await state.get_data()
     file_id_pk = data.get("current_file_id")
     new_name = message.text.strip()
+    if not new_name: return
+    
     await asyncio.to_thread(db.rename_file, file_id_pk, new_name)
     await state.update_data(current_file_name=new_name)
     await message.answer(f"✅ Файл переименован в <b>{escape(new_name)}</b>", parse_mode="HTML", reply_markup=get_file_action_kb())
@@ -309,36 +341,58 @@ async def process_file_rename(message: Message, state: FSMContext):
 
 @dp.message(F.text == "🔍 Поиск")
 async def search_init(message: Message, state: FSMContext):
-    await message.answer("🔍 Введите название файла для поиска:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔙 Назад")]], resize_keyboard=True))
+    await message.answer("🔍 Введите название файла (или часть названия) для поиска:", 
+                         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔙 Назад")]], resize_keyboard=True))
     await state.set_state(StorageStates.waiting_for_search)
 
 @dp.message(StorageStates.waiting_for_search)
 async def process_search(message: Message, state: FSMContext):
     if message.text == "🔙 Назад": return await back_to_main(message, state)
-    results = await asyncio.to_thread(db.search_files, message.from_user.id, message.text.strip())
+    query = message.text.strip()
+    if not query: return
+    
+    results = await asyncio.to_thread(db.search_files, message.from_user.id, query)
     if not results:
-        await message.answer("Ничего не найдено 🤷‍♂️")
+        await message.answer(f"По запросу '{escape(query)}' ничего не найдено 🤷‍♂️", reply_markup=await get_main_reply_kb(message.from_user.id))
     else:
-        text = "🔍 Результаты поиска:\n\n"
+        text = f"🔍 Найдено {len(results)} результатов:\n\n"
         for _, f_name, folder_name, f_type in results:
-            text += f"• {f_name} (📁 {folder_name})\n"
+            icon = "📄"
+            if f_type == "photo": icon = "🖼"
+            text += f"{icon} {f_name} (📁 {folder_name})\n"
         await message.answer(text, reply_markup=await get_main_reply_kb(message.from_user.id))
     await state.set_state(StorageStates.main_menu)
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_cmd(message: Message):
-    await message.answer("Это ваше структурированное облако.\n\n1. Создавайте папки.\n2. Заходите в них и добавляйте файлы.\n3. Все файлы всегда под рукой на клавиатуре!")
+    await message.answer("📖 <b>CloudBox - Ваше удобное хранилище</b>\n\n"
+                         "• Используйте кнопки снизу для навигации по папкам.\n"
+                         "• Заходите в папку и нажимайте 'Добавить файл' для сохранения.\n"
+                         "• Все файлы отображаются прямо на кнопках - один клик и файл у вас.\n"
+                         "• Поиск работает по всем папкам одновременно.", parse_mode="HTML")
+
+# --- ОШИБКИ ---
+
+@dp.error()
+async def error_handler(event: types.ErrorEvent):
+    logger.error(f"CRITICAL ERROR: {event.exception}", exc_info=True)
+    try:
+        msg = "⚠️ Произошла внутренняя ошибка. Пожалуйста, вернитесь в главное меню /start"
+        if event.update.message:
+            await event.update.message.answer(msg)
+    except: pass
 
 # --- FASTAPI ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("🚀 BOT VERSION 2.0 STARTED")
     asyncio.create_task(dp.start_polling(bot))
     yield
 
 app = FastAPI(lifespan=lifespan)
 @app.get("/")
-async def root(): return {"status": "ok"}
+async def root(): return {"status": "ok", "version": "2.0"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
